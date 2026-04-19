@@ -176,7 +176,7 @@ func (a *AWS) ListClusters(ctx context.Context) ([]model.Cluster, error) {
 }
 
 // =====================
-// 🔥 ВОТ ЧЕГО НЕ ХВАТАЛО
+// 🔥 
 // =====================
 func (a *AWS) GetCredentials(ctx context.Context, c model.Cluster) error {
 	profile := os.Getenv("AWS_PROFILE")

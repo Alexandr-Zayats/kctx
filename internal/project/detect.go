@@ -9,13 +9,13 @@ func DetectAWSConfig() (string, string) {
 	dir, _ := os.Getwd()
 
 	for {
-		// 🔥 сначала yaml
+		// 🔥 yaml
 		yaml := filepath.Join(dir, ".kctx", "aws.yaml")
 		if _, err := os.Stat(yaml); err == nil {
 			return dir, yaml
 		}
 
-		// 🔥 потом conf
+		// 🔥 conf
 		conf := filepath.Join(dir, ".kctx", "aws.conf")
 		if _, err := os.Stat(conf); err == nil {
 			return dir, conf
