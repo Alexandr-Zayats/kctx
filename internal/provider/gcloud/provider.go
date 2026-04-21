@@ -79,6 +79,11 @@ func (g *GCloud) ListProjects(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("gcp account is not selected")
 	}
 
+	key := gcpProjectsCacheKey(account)
+	if data, ok := cache.Get(key); ok {
+		return parseProjects(data), nil
+	}
+
 	cmd := exec.CommandContext(
 		ctx,
 		"gcloud",
@@ -92,30 +97,8 @@ func (g *GCloud) ListProjects(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("gcloud projects list failed for account %s: %s", account, strings.TrimSpace(string(out)))
 	}
 
-	lines := strings.Split(string(out), "\n")
-
-	var res []string
-	var fallback []string
-
-	for _, p := range lines {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-
-		fallback = append(fallback, p)
-		count := getClusterCount(ctx, account, p)
-
-		if count > 0 {
-			res = append(res, fmt.Sprintf("%s (%d)", p, count))
-		}
-	}
-
-	if len(res) == 0 {
-		return fallback, nil
-	}
-
-	return res, nil
+	cache.Set(key, out, 30*time.Minute)
+	return parseProjects(out), nil
 }
 
 func (g *GCloud) ListClusters(ctx context.Context) ([]model.Cluster, error) {
@@ -159,7 +142,7 @@ func (g *GCloud) ListClusters(ctx context.Context) ([]model.Cluster, error) {
 		return []model.Cluster{}, nil
 	}
 
-	cache.Set(key, out, 90*time.Second)
+	cache.Set(key, out, 10*time.Minute)
 	return parseClustersFromValue(out), nil
 }
 
@@ -189,16 +172,12 @@ func (g *GCloud) GetCredentials(ctx context.Context, c model.Cluster) error {
 		return cmd.Run()
 	}
 
-	// zonal first
-	err := run("--zone")
-	if err != nil {
-		// regional fallback
+	if err := run("--zone"); err != nil {
 		if err2 := run("--region"); err2 != nil {
 			return err2
 		}
 	}
 
-	// Force kubectl current-context to the exact GKE context we just fetched.
 	gkeContext := fmt.Sprintf("gke_%s_%s_%s", project, c.Location, c.Name)
 
 	useCmd := exec.CommandContext(
@@ -215,37 +194,27 @@ func (g *GCloud) GetCredentials(ctx context.Context, c model.Cluster) error {
 	return nil
 }
 
-func getClusterCount(ctx context.Context, account, project string) int {
-	key := gcpClusterCountCacheKey(account, project)
-
-	if data, ok := cache.Get(key); ok {
-		return len(strings.Fields(string(data)))
-	}
-
-	cmd := exec.CommandContext(
-		ctx,
-		"gcloud",
-		"container", "clusters", "list",
-		"--account="+account,
-		"--project="+project,
-		"--format=value(name)",
-	)
-
-	out, err := cmd.Output()
-	if err != nil {
-		return 0
-	}
-
-	cache.Set(key, out, 2*time.Minute)
-	return len(strings.Fields(string(out)))
+func gcpProjectsCacheKey(account string) string {
+	return "gcp_projects_" + account
 }
 
 func gcpClusterListCacheKey(account, project string) string {
 	return "gcp_clusters_list_" + account + "_" + project
 }
 
-func gcpClusterCountCacheKey(account, project string) string {
-	return "gcp_clusters_count_" + account + "_" + project
+func parseProjects(data []byte) []string {
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+
+	var res []string
+	for _, p := range lines {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		res = append(res, p)
+	}
+
+	return res
 }
 
 func parseClustersFromValue(data []byte) []model.Cluster {

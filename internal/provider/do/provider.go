@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 	"time"
 
 	"kctx/internal/cache"
@@ -20,7 +19,6 @@ func (d *DO) Name() string {
 	return "do"
 }
 
-// CheckAuth adds a clear, actionable error instead of generic "exit status 1".
 func (d *DO) CheckAuth(ctx context.Context) error {
 	if _, err := exec.LookPath("doctl"); err != nil {
 		return fmt.Errorf("DigitalOcean CLI not found. Install 'doctl' and try again")
@@ -49,74 +47,41 @@ func (d *DO) CheckAuth(ctx context.Context) error {
 }
 
 func (d *DO) ListAccounts(ctx context.Context) ([]model.Account, error) {
-	out, err := exec.CommandContext(ctx, "doctl", "auth", "list").Output()
-	if err != nil {
-		return nil, err
+	key := "do_contexts"
+
+	var out []byte
+	if data, ok := cache.Get(key); ok {
+		out = data
+	} else {
+		var err error
+		out, err = exec.CommandContext(ctx, "doctl", "auth", "list").Output()
+		if err != nil {
+			return nil, err
+		}
+		cache.Set(key, out, 15*time.Minute)
 	}
 
 	lines := strings.Split(string(out), "\n")
 
-	type result struct {
-		context string
-		team    string
-		count   int
-	}
-
-	var contexts []string
+	var res []model.Account
 	for _, l := range lines {
 		l = strings.TrimSpace(l)
 		if l == "" {
 			continue
 		}
 
-		name := strings.ReplaceAll(l, " (current)", "")
-		contexts = append(contexts, name)
-	}
+		contextName := strings.ReplaceAll(l, " (current)", "")
+		label := contextName
 
-	ch := make(chan result, len(contexts))
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 5)
-
-	for _, ctxName := range contexts {
-		wg.Add(1)
-
-		go func(c string) {
-			defer wg.Done()
-
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			team := getTeamName(ctx, c)
-			count := getClusterCount(ctx, c)
-
-			ch <- result{
-				context: c,
-				team:    team,
-				count:   count,
-			}
-		}(ctxName)
-	}
-
-	wg.Wait()
-	close(ch)
-
-	var res []model.Account
-
-	for r := range ch {
-		label := r.context
-
-		if r.team != "" {
-			label = fmt.Sprintf("%s [%s]", r.context, r.team)
-		}
-
-		if r.count > 0 {
-			label = fmt.Sprintf("%s (%d)", label, r.count)
+		team := getTeamName(ctx, contextName)
+		if team != "" {
+			label = fmt.Sprintf("%s [%s]", contextName, team)
 		}
 
 		res = append(res, model.Account{
 			Name: label,
 			Meta: map[string]string{
-				"context": r.context,
+				"context": contextName,
 			},
 		})
 	}
@@ -149,6 +114,16 @@ func (d *DO) UseAccount(ctx context.Context, acc model.Account) error {
 }
 
 func (d *DO) ListClusters(ctx context.Context) ([]model.Cluster, error) {
+	currentContext, err := currentDOContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	key := "do_clusters_" + currentContext
+	if data, ok := cache.Get(key); ok {
+		return parseDOClusters(data), nil
+	}
+
 	cmd := exec.CommandContext(ctx,
 		"doctl", "kubernetes", "cluster", "list",
 		"--format", "Name", "--no-header",
@@ -159,19 +134,8 @@ func (d *DO) ListClusters(ctx context.Context) ([]model.Cluster, error) {
 		return nil, err
 	}
 
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-
-	var res []model.Cluster
-	for _, l := range lines {
-		l = strings.TrimSpace(l)
-		if l == "" {
-			continue
-		}
-
-		res = append(res, model.Cluster{Name: l})
-	}
-
-	return res, nil
+	cache.Set(key, out, 10*time.Minute)
+	return parseDOClusters(out), nil
 }
 
 func (d *DO) GetCredentials(ctx context.Context, c model.Cluster) error {
@@ -186,7 +150,19 @@ func (d *DO) GetCredentials(ctx context.Context, c model.Cluster) error {
 }
 
 func ensureContextExists(ctx context.Context, name string) error {
-	out, _ := exec.CommandContext(ctx, "doctl", "auth", "list").Output()
+	key := "do_contexts"
+
+	var out []byte
+	if data, ok := cache.Get(key); ok {
+		out = data
+	} else {
+		var err error
+		out, err = exec.CommandContext(ctx, "doctl", "auth", "list").Output()
+		if err != nil {
+			return err
+		}
+		cache.Set(key, out, 15*time.Minute)
+	}
 
 	if !strings.Contains(string(out), name) {
 		return fmt.Errorf("DO context '%s' not found. Run: kctx do add", name)
@@ -195,10 +171,29 @@ func ensureContextExists(ctx context.Context, name string) error {
 	return nil
 }
 
-// IMPORTANT:
-// use "--context" instead of mutating global current context via "doctl auth switch".
-// This avoids cross-account side effects and race conditions.
+func currentDOContext(ctx context.Context) (string, error) {
+	out, err := exec.CommandContext(ctx, "doctl", "auth", "list").Output()
+	if err != nil {
+		return "", err
+	}
+
+	lines := strings.Split(string(out), "\n")
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		if strings.HasSuffix(l, " (current)") {
+			return strings.TrimSpace(strings.TrimSuffix(l, " (current)")), nil
+		}
+	}
+
+	return "", fmt.Errorf("current DO context not found")
+}
+
 func getTeamName(ctx context.Context, contextName string) string {
+	key := "do_team_" + contextName
+	if data, ok := cache.Get(key); ok {
+		return strings.TrimSpace(string(data))
+	}
+
 	out, err := exec.CommandContext(ctx,
 		"doctl",
 		"--context", contextName,
@@ -211,37 +206,21 @@ func getTeamName(ctx context.Context, contextName string) string {
 		return ""
 	}
 
+	cache.Set(key, out, 30*time.Minute)
 	return strings.TrimSpace(string(out))
 }
 
-func getClusterCount(ctx context.Context, contextName string) int {
-	key := "do_clusters_" + contextName
+func parseDOClusters(data []byte) []model.Cluster {
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
 
-	if data, ok := cache.Get(key); ok {
-		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-		if len(lines) == 1 && lines[0] == "" {
-			return 0
+	var res []model.Cluster
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
 		}
-		return len(lines)
+		res = append(res, model.Cluster{Name: l})
 	}
 
-	cmd := exec.CommandContext(ctx,
-		"doctl",
-		"--context", contextName,
-		"kubernetes", "cluster", "list",
-		"--format", "Name", "--no-header",
-	)
-
-	out, err := cmd.Output()
-	if err != nil {
-		return 0
-	}
-
-	cache.Set(key, out, 2*time.Minute)
-
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) == 1 && lines[0] == "" {
-		return 0
-	}
-	return len(lines)
+	return res
 }

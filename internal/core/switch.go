@@ -31,7 +31,6 @@ func (s *Switcher) Run(ctx context.Context) error {
 		}
 	}
 
-	// Optional auth pre-flight check.
 	if ac, ok := p.(provider.AuthChecker); ok {
 		if err := ac.CheckAuth(ctx); err != nil {
 			return err
@@ -116,24 +115,6 @@ func (s *Switcher) Run(ctx context.Context) error {
 
 	if err := kube.RenameCurrentContext(ctxName); err != nil {
 		return err
-	}
-
-	namespaces, err := kube.ListNamespaces(ctx)
-	if err != nil {
-		return err
-	}
-
-	if len(namespaces) > 0 {
-		ns, err := ui.SelectString("Namespace", namespaces)
-		if err != nil {
-			return err
-		}
-
-		if err := kube.SetNamespace(ctx, ns); err != nil {
-			return err
-		}
-
-		fmt.Println("Switched namespace to:", ns)
 	}
 
 	fmt.Println("Switched to:", ctxName)
