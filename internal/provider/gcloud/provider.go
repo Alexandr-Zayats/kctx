@@ -174,32 +174,45 @@ func (g *GCloud) GetCredentials(ctx context.Context, c model.Cluster) error {
 		return fmt.Errorf("gcp project is not selected")
 	}
 
-	cmd := exec.CommandContext(
-		ctx,
-		"gcloud",
-		"container", "clusters", "get-credentials",
-		c.Name,
-		"--account="+account,
-		"--project="+project,
-		"--zone", c.Location,
-	)
-	if err := cmd.Run(); err == nil {
-		return nil
+	run := func(scopeFlag string) error {
+		cmd := exec.CommandContext(
+			ctx,
+			"gcloud",
+			"container", "clusters", "get-credentials",
+			c.Name,
+			"--account="+account,
+			"--project="+project,
+			scopeFlag, c.Location,
+		)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		return cmd.Run()
 	}
 
-	cmd = exec.CommandContext(
-		ctx,
-		"gcloud",
-		"container", "clusters", "get-credentials",
-		c.Name,
-		"--account="+account,
-		"--project="+project,
-		"--region", c.Location,
-	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// zonal first
+	err := run("--zone")
+	if err != nil {
+		// regional fallback
+		if err2 := run("--region"); err2 != nil {
+			return err2
+		}
+	}
 
-	return cmd.Run()
+	// Force kubectl current-context to the exact GKE context we just fetched.
+	gkeContext := fmt.Sprintf("gke_%s_%s_%s", project, c.Location, c.Name)
+
+	useCmd := exec.CommandContext(
+		ctx,
+		"kubectl", "config", "use-context", gkeContext,
+	)
+	useCmd.Stdout = os.Stdout
+	useCmd.Stderr = os.Stderr
+
+	if err := useCmd.Run(); err != nil {
+		return fmt.Errorf("failed to select gke context %q: %w", gkeContext, err)
+	}
+
+	return nil
 }
 
 func getClusterCount(ctx context.Context, account, project string) int {

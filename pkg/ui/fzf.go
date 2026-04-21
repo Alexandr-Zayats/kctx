@@ -7,44 +7,36 @@ import (
 	"strings"
 )
 
-func Select(label string, items []string) (string, error) {
+func FzfSelect(title string, items []string) (string, error) {
 	if len(items) == 0 {
 		return "", fmt.Errorf("no items to select")
 	}
 
-	cmd := exec.Command("fzf", "--prompt", label+": ")
+	input := strings.Join(items, "\n")
 
-	cmd.Stdin = strings.NewReader(strings.Join(items, "\n"))
+	args := []string{
+		"--height=20",
+		"--layout=reverse",
+		"--border",
+		"--ansi",
+		"--prompt=" + title + "> ",
+	}
 
-	var out bytes.Buffer
-	cmd.Stdout = &out
+	cmd := exec.Command("fzf", args...)
+	cmd.Stdin = strings.NewReader(input)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return "", err
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "", fmt.Errorf("fzf failed: %s", msg)
 	}
 
-	return strings.TrimSpace(out.String()), nil
-}
-
-func SelectWithPreview(label string, items []string, previewCmd string) (string, error) {
-	if len(items) == 0 {
-		return "", fmt.Errorf("no items to select")
-	}
-
-	cmd := exec.Command("fzf",
-		"--prompt", label+": ",
-		"--preview", previewCmd,
-		"--preview-window=right:60%",
-	)
-
-	cmd.Stdin = strings.NewReader(strings.Join(items, "\n"))
-
-	var out bytes.Buffer
-	cmd.Stdout = &out
-
-	if err := cmd.Run(); err != nil {
-		return "", err
-	}
-
-	return strings.TrimSpace(out.String()), nil
+	return strings.TrimSpace(stdout.String()), nil
 }
