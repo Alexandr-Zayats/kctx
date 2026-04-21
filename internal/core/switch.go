@@ -31,6 +31,13 @@ func (s *Switcher) Run(ctx context.Context) error {
 		}
 	}
 
+	// Optional auth pre-flight check.
+	if ac, ok := p.(provider.AuthChecker); ok {
+		if err := ac.CheckAuth(ctx); err != nil {
+			return err
+		}
+	}
+
 	accs, err := p.ListAccounts(ctx)
 	if err != nil {
 		return err

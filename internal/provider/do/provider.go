@@ -2,6 +2,7 @@ package do
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,6 +18,34 @@ type DO struct{}
 
 func (d *DO) Name() string {
 	return "do"
+}
+
+// CheckAuth adds a clear, actionable error instead of generic "exit status 1".
+func (d *DO) CheckAuth(ctx context.Context) error {
+	if _, err := exec.LookPath("doctl"); err != nil {
+		return fmt.Errorf("DigitalOcean CLI not found. Install 'doctl' and try again")
+	}
+
+	checkCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(checkCtx, "doctl", "account", "get")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+
+	msg := strings.TrimSpace(string(out))
+
+	if errors.Is(checkCtx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("DigitalOcean auth check timed out. Re-run 'doctl auth init'")
+	}
+
+	if msg == "" {
+		return fmt.Errorf("DigitalOcean not authenticated.\n\nRun:\n  doctl auth init")
+	}
+
+	return fmt.Errorf("DigitalOcean not authenticated.\n\nRun:\n  doctl auth init\n\nDetails:\n  %s", msg)
 }
 
 func (d *DO) ListAccounts(ctx context.Context) ([]model.Account, error) {
@@ -166,11 +195,14 @@ func ensureContextExists(ctx context.Context, name string) error {
 	return nil
 }
 
-func getTeamName(ctx context.Context, context string) string {
-	_ = exec.CommandContext(ctx, "doctl", "auth", "switch", "--context", context).Run()
-
+// IMPORTANT:
+// use "--context" instead of mutating global current context via "doctl auth switch".
+// This avoids cross-account side effects and race conditions.
+func getTeamName(ctx context.Context, contextName string) string {
 	out, err := exec.CommandContext(ctx,
-		"doctl", "account", "get",
+		"doctl",
+		"--context", contextName,
+		"account", "get",
 		"--format", "Team",
 		"--no-header",
 	).Output()
@@ -182,8 +214,8 @@ func getTeamName(ctx context.Context, context string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func getClusterCount(ctx context.Context, context string) int {
-	key := "do_clusters_" + context
+func getClusterCount(ctx context.Context, contextName string) int {
+	key := "do_clusters_" + contextName
 
 	if data, ok := cache.Get(key); ok {
 		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
@@ -193,10 +225,10 @@ func getClusterCount(ctx context.Context, context string) int {
 		return len(lines)
 	}
 
-	_ = exec.CommandContext(ctx, "doctl", "auth", "switch", "--context", context).Run()
-
 	cmd := exec.CommandContext(ctx,
-		"doctl", "kubernetes", "cluster", "list",
+		"doctl",
+		"--context", contextName,
+		"kubernetes", "cluster", "list",
 		"--format", "Name", "--no-header",
 	)
 

@@ -51,6 +51,9 @@ func (g *GCloud) ListAccounts(ctx context.Context) ([]model.Account, error) {
 
 func (g *GCloud) ListProjects(ctx context.Context) ([]string, error) {
 	account := os.Getenv("CLOUDSDK_CORE_ACCOUNT")
+	if account == "" {
+		return nil, fmt.Errorf("gcp account is not selected")
+	}
 
 	out, err := exec.CommandContext(
 		ctx,
@@ -75,7 +78,7 @@ func (g *GCloud) ListProjects(ctx context.Context) ([]string, error) {
 		}
 
 		fallback = append(fallback, p)
-		count := getClusterCount(ctx, p)
+		count := getClusterCount(ctx, account, p)
 
 		if count > 0 {
 			res = append(res, fmt.Sprintf("%s (%d)", p, count))
@@ -109,7 +112,7 @@ func (g *GCloud) ListClusters(ctx context.Context) ([]model.Cluster, error) {
 		return []model.Cluster{}, nil
 	}
 
-	key := "gcp_clusters_" + project
+	key := gcpClusterCacheKey(account, project)
 
 	if data, ok := cache.Get(key); ok {
 		return parseClustersFromValue(data), nil
@@ -135,6 +138,7 @@ func (g *GCloud) ListClusters(ctx context.Context) ([]model.Cluster, error) {
 
 func (g *GCloud) GetCredentials(ctx context.Context, c model.Cluster) error {
 	account := os.Getenv("CLOUDSDK_CORE_ACCOUNT")
+	project := os.Getenv("KCTX_GCP_PROJECT")
 
 	cmd := exec.CommandContext(
 		ctx,
@@ -142,6 +146,7 @@ func (g *GCloud) GetCredentials(ctx context.Context, c model.Cluster) error {
 		"container", "clusters", "get-credentials",
 		c.Name,
 		"--account="+account,
+		"--project="+project,
 		"--zone", c.Location,
 	)
 	if err := cmd.Run(); err == nil {
@@ -154,6 +159,7 @@ func (g *GCloud) GetCredentials(ctx context.Context, c model.Cluster) error {
 		"container", "clusters", "get-credentials",
 		c.Name,
 		"--account="+account,
+		"--project="+project,
 		"--region", c.Location,
 	)
 	cmd.Stdout = os.Stdout
@@ -162,9 +168,8 @@ func (g *GCloud) GetCredentials(ctx context.Context, c model.Cluster) error {
 	return cmd.Run()
 }
 
-func getClusterCount(ctx context.Context, project string) int {
-	account := os.Getenv("CLOUDSDK_CORE_ACCOUNT")
-	key := "gcp_clusters_" + project
+func getClusterCount(ctx context.Context, account, project string) int {
+	key := gcpClusterCacheKey(account, project)
 
 	if data, ok := cache.Get(key); ok {
 		return len(strings.Fields(string(data)))
@@ -186,6 +191,10 @@ func getClusterCount(ctx context.Context, project string) int {
 
 	cache.Set(key, out, 2*time.Minute)
 	return len(strings.Fields(string(out)))
+}
+
+func gcpClusterCacheKey(account, project string) string {
+	return "gcp_clusters_" + account + "_" + project
 }
 
 func parseClustersFromValue(data []byte) []model.Cluster {
