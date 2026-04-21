@@ -22,24 +22,31 @@ func (g *GCloud) Name() string {
 func (g *GCloud) ListAccounts(ctx context.Context) ([]model.Account, error) {
 	out, err := exec.CommandContext(ctx, "gcloud", "auth", "list", "--format=json").Output()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("gcloud auth list failed: %w", err)
 	}
 
 	var data []struct {
 		Account string `json:"account"`
+		Status  string `json:"status"`
 	}
 
 	if err := json.Unmarshal(out, &data); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to parse gcloud auth list output: %w", err)
 	}
 
 	var res []model.Account
 	for _, a := range data {
-		if a.Account == "" {
+		if strings.TrimSpace(a.Account) == "" {
 			continue
 		}
+
+		label := a.Account
+		if strings.EqualFold(a.Status, "ACTIVE") {
+			label += " (active)"
+		}
+
 		res = append(res, model.Account{
-			Name: a.Account,
+			Name: label,
 			Meta: map[string]string{
 				"account": a.Account,
 			},
@@ -49,21 +56,40 @@ func (g *GCloud) ListAccounts(ctx context.Context) ([]model.Account, error) {
 	return res, nil
 }
 
+func (g *GCloud) UseAccount(ctx context.Context, acc model.Account) error {
+	account := acc.Name
+	if acc.Meta != nil {
+		if v, ok := acc.Meta["account"]; ok && strings.TrimSpace(v) != "" {
+			account = v
+		}
+	}
+
+	account = strings.TrimSpace(account)
+	if account == "" {
+		return fmt.Errorf("gcp account is empty")
+	}
+
+	os.Setenv("CLOUDSDK_CORE_ACCOUNT", account)
+	return nil
+}
+
 func (g *GCloud) ListProjects(ctx context.Context) ([]string, error) {
-	account := os.Getenv("CLOUDSDK_CORE_ACCOUNT")
+	account := strings.TrimSpace(os.Getenv("CLOUDSDK_CORE_ACCOUNT"))
 	if account == "" {
 		return nil, fmt.Errorf("gcp account is not selected")
 	}
 
-	out, err := exec.CommandContext(
+	cmd := exec.CommandContext(
 		ctx,
 		"gcloud",
 		"projects", "list",
 		"--account="+account,
 		"--format=value(projectId)",
-	).Output()
+	)
+
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("gcloud projects list failed for account %s: %s", account, strings.TrimSpace(string(out)))
 	}
 
 	lines := strings.Split(string(out), "\n")
@@ -92,27 +118,19 @@ func (g *GCloud) ListProjects(ctx context.Context) ([]string, error) {
 	return res, nil
 }
 
-func (g *GCloud) UseAccount(ctx context.Context, acc model.Account) error {
-	account := acc.Name
-	if acc.Meta != nil {
-		if v, ok := acc.Meta["account"]; ok {
-			account = v
-		}
-	}
-
-	os.Setenv("CLOUDSDK_CORE_ACCOUNT", account)
-	return nil
-}
-
 func (g *GCloud) ListClusters(ctx context.Context) ([]model.Cluster, error) {
-	project := os.Getenv("KCTX_GCP_PROJECT")
-	account := os.Getenv("CLOUDSDK_CORE_ACCOUNT")
+	project := strings.TrimSpace(os.Getenv("KCTX_GCP_PROJECT"))
+	account := strings.TrimSpace(os.Getenv("CLOUDSDK_CORE_ACCOUNT"))
 
-	if project == "" || account == "" {
-		return []model.Cluster{}, nil
+	if account == "" {
+		return nil, fmt.Errorf("gcp account is not selected")
 	}
 
-	key := gcpClusterCacheKey(account, project)
+	if project == "" {
+		return nil, fmt.Errorf("gcp project is not selected")
+	}
+
+	key := gcpClusterListCacheKey(account, project)
 
 	if data, ok := cache.Get(key); ok {
 		return parseClustersFromValue(data), nil
@@ -127,8 +145,17 @@ func (g *GCloud) ListClusters(ctx context.Context) ([]model.Cluster, error) {
 		"--format=value(name,location)",
 	)
 
-	out, err := cmd.Output()
-	if err != nil || len(out) == 0 {
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf(
+			"gcloud container clusters list failed for account=%s project=%s: %s",
+			account,
+			project,
+			strings.TrimSpace(string(out)),
+		)
+	}
+
+	if len(strings.TrimSpace(string(out))) == 0 {
 		return []model.Cluster{}, nil
 	}
 
@@ -137,8 +164,15 @@ func (g *GCloud) ListClusters(ctx context.Context) ([]model.Cluster, error) {
 }
 
 func (g *GCloud) GetCredentials(ctx context.Context, c model.Cluster) error {
-	account := os.Getenv("CLOUDSDK_CORE_ACCOUNT")
-	project := os.Getenv("KCTX_GCP_PROJECT")
+	account := strings.TrimSpace(os.Getenv("CLOUDSDK_CORE_ACCOUNT"))
+	project := strings.TrimSpace(os.Getenv("KCTX_GCP_PROJECT"))
+
+	if account == "" {
+		return fmt.Errorf("gcp account is not selected")
+	}
+	if project == "" {
+		return fmt.Errorf("gcp project is not selected")
+	}
 
 	cmd := exec.CommandContext(
 		ctx,
@@ -169,7 +203,7 @@ func (g *GCloud) GetCredentials(ctx context.Context, c model.Cluster) error {
 }
 
 func getClusterCount(ctx context.Context, account, project string) int {
-	key := gcpClusterCacheKey(account, project)
+	key := gcpClusterCountCacheKey(account, project)
 
 	if data, ok := cache.Get(key); ok {
 		return len(strings.Fields(string(data)))
@@ -193,8 +227,12 @@ func getClusterCount(ctx context.Context, account, project string) int {
 	return len(strings.Fields(string(out)))
 }
 
-func gcpClusterCacheKey(account, project string) string {
-	return "gcp_clusters_" + account + "_" + project
+func gcpClusterListCacheKey(account, project string) string {
+	return "gcp_clusters_list_" + account + "_" + project
+}
+
+func gcpClusterCountCacheKey(account, project string) string {
+	return "gcp_clusters_count_" + account + "_" + project
 }
 
 func parseClustersFromValue(data []byte) []model.Cluster {
